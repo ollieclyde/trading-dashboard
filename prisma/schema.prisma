@@ -1,0 +1,305 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CURRENT STATE TABLES — upserted each daily run, Postgres is source of truth
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Live theme state. One row per theme, updated each run.
+/// Historical record lives in ThemeSnapshot.
+model Theme {
+  themeKey            String    @id @map("theme_key")
+  name                String
+  lane                String    @default("STRATEGIC") // TACTICAL | STRATEGIC
+  lifecycle           String    // TACTICAL: EMERGING | ACTIVE | DECLINING | RETIRED; STRATEGIC: EMERGING | GROWING | MATURE | DECLINING | RETIREMENT_ELIGIBLE | RETIRED
+  conviction          String?   // HIGH | MEDIUM | LOW
+  status              String?   // STRENGTHENING | NEUTRAL | WEAKENING
+  exhaustionScore     Float?    @map("exhaustion_score")
+  firstIdentified     DateTime? @map("first_identified") @db.Date
+  lastStrengthened    DateTime? @map("last_strengthened") @db.Date
+  retirementGraceDays Int       @default(0) @map("retirement_grace_days")
+  expectedDurationDays Int?     @map("expected_duration_days") // TACTICAL: 7-42; STRATEGIC: 60-180; used for exhaustion normalisation
+  catalystDeadline    DateTime? @map("catalyst_deadline") @db.Date // TACTICAL: hard deadline for catalyst resolution
+  tradeableLongOnly   Boolean   @default(true) @map("tradeable_long_only") // false = no long-only T212 expression; screener skips this theme
+  searchQueries       String[]  @map("search_queries")
+  summary             String?
+  keyEvents           Json      @default("[]") @map("key_events") // KeyEvent[]
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  snapshots ThemeSnapshot[]
+
+  @@map("themes")
+}
+
+/// Staging area for world-scanner proposals awaiting promotion.
+model ThemeProposal {
+  id             String    @id
+  themeKey       String    @map("theme_key")
+  lane           String    @default("STRATEGIC") // TACTICAL | STRATEGIC
+  proposedDate   DateTime  @map("proposed_date") @db.Date
+  title          String
+  rationale      String?
+  validationDays Int       @default(0) @map("validation_days")
+  lastValidated  DateTime? @map("last_validated") @db.Date
+  status         String    @default("STAGING") // STAGING | PROMOTED | EXPIRED
+
+  @@map("theme_proposals")
+}
+
+/// Upcoming catalysts for the next 14 days. Replaced wholesale each run.
+model ActiveCatalyst {
+  id           Int      @id @default(autoincrement())
+  themeKey     String   @map("theme_key")
+  catalystDate DateTime @map("catalyst_date") @db.Date
+  description  String
+  ticker       String?
+  source       String?
+
+  @@index([catalystDate])
+  @@map("active_catalysts")
+}
+
+/// Open and closed positions (one per investment thesis).
+/// Prices and P&L updated daily. Historical execution lives in Trade.
+model Position {
+  id                 Int       @id @default(autoincrement())
+  ticker             String
+  themeKey           String    @map("theme_key")
+  lane               String    @default("STRATEGIC") // TACTICAL | STRATEGIC — inherited from theme at position open
+  strategyType       String?   @map("strategy_type") // CATALYST_PLAY | REGIME_ROTATION | MOMENTUM_RIDE | MEAN_REVERSION | BREAKOUT | SPECULATIVE | MACRO_HEDGE
+  direction          String    @default("LONG")
+  status             String    @default("OPEN") // OPEN | CLOSED
+  isPaper            Boolean   @default(true) @map("is_paper")
+  openedDate         DateTime  @map("opened_date") @db.Date
+  closedDate         DateTime? @map("closed_date") @db.Date
+  entryPriceAvg      Float?    @map("entry_price_avg")
+  exitPrice          Float?    @map("exit_price")
+  sizeUsd            Float?    @map("size_usd")
+  currentPrice       Float?    @map("current_price")
+  peakPrice          Float?    @map("peak_price")         // highest price since entry — used by TRAILING_STOP
+  unrealizedPnlPct   Float?    @map("unrealized_pnl_pct")
+  realizedPnlUsd     Float?    @map("realized_pnl_usd")
+  realizedPnlPct     Float?    @map("realized_pnl_pct")
+  exitRule           String?   @map("exit_rule")       // legacy free-text — kept for existing positions
+  exitRulesJson      Json?     @map("exit_rules_json") // structured ExitRule[] — written for all new positions
+  linkedSuggestionId Int?      @map("linked_suggestion_id")
+  notes              String?
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  linkedSuggestion StockSuggestion? @relation(fields: [linkedSuggestionId], references: [id])
+  trades           Trade[]
+
+  @@index([ticker, status])
+  @@index([closedDate, status])
+  @@map("positions")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HISTORICAL TABLES — append-only, never updated
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Daily snapshot of each theme's conviction/lifecycle/exhaustion.
+/// One row per theme per day — enables tracking thesis evolution over time.
+model ThemeSnapshot {
+  id              Int      @id @default(autoincrement())
+  snapshotDate    DateTime @map("snapshot_date") @db.Date
+  themeKey        String   @map("theme_key")
+  lifecycle       String
+  conviction      String?
+  exhaustionScore Float?   @map("exhaustion_score")
+  status          String?
+  summary         String?
+
+  theme Theme @relation(fields: [themeKey], references: [themeKey])
+
+  @@unique([snapshotDate, themeKey])
+  @@index([themeKey, snapshotDate(sort: Desc)])
+  @@map("theme_snapshots")
+}
+
+/// Append-only log of every screener/risk-agent decision on a stock.
+/// ADD → UPDATE → RETIRE chain per ticker. Links to Position when executed.
+model StockSuggestion {
+  id            Int      @id @default(autoincrement())
+  ticker        String
+  themeKey      String   @map("theme_key")
+  action        String   // ADD | UPDATE | RETIRE
+  actionDate    DateTime @map("action_date") @db.Date
+  confidence    String?  // HIGH | MEDIUM | LOW
+  priceAtAction Float?   @map("price_at_action")
+  thesis        String?
+  bullCase      String?  @map("bull_case")
+  bearCase      String?  @map("bear_case")
+  exitRule      String?  @map("exit_rule")       // legacy free-text — kept for historical rows
+  exitRulesJson Json?    @map("exit_rules_json") // structured ExitRule[] — written for all new decisions
+  sizing        String?
+  lane          String?                           // TACTICAL | STRATEGIC
+  strategyType  String?  @map("strategy_type")   // CATALYST_PLAY | REGIME_ROTATION | MOMENTUM_RIDE | MEAN_REVERSION | BREAKOUT | SPECULATIVE | MACRO_HEDGE
+  regimeAtEntry String?  @map("regime_at_entry")
+  returnPct     Float?   @map("return_pct")
+
+  positions          Position[]
+  debateTranscripts  DebateTranscript[]
+
+  @@index([ticker, actionDate, action])
+  @@map("stock_suggestions")
+}
+
+/// Individual order executions — child of Position.
+/// One Position can have multiple Trades (e.g. add to a position, partial sell).
+model Trade {
+  id            Int      @id @default(autoincrement())
+  positionId    Int      @map("position_id")
+  ticker        String
+  t212Ticker    String?  @map("t212_ticker")       // T212 instrument id e.g. AAPL_US_EQ
+  tradeType     String   @map("trade_type")         // BUY | SELL | REDUCE
+  tradeDate     DateTime @map("trade_date") @db.Date
+  quantity      Float?                               // fractional shares supported
+  fillPrice     Float?   @map("fill_price")         // actual execution price in instrument native currency
+  valueGbp      Float?   @map("value_gbp")          // target GBP value at time of order
+  fxRateGbpUsd  Float?   @map("fx_rate_gbp_usd")   // GBP/USD rate used for sizing
+  sizingLabel   String?  @map("sizing_label")       // full | reduced | small
+  t212OrderId   BigInt?  @map("t212_order_id")
+  t212Status    String?  @map("t212_status")        // PENDING | FILLED | CANCELLED
+  isPaper       Boolean  @default(true) @map("is_paper")
+  notes         String?
+
+  position Position @relation(fields: [positionId], references: [id])
+
+  @@unique([t212OrderId])  // partial unique — enforces idempotency for T212 trades (NULL values excluded by Postgres)
+  @@index([positionId])
+  @@map("trades")
+}
+
+/// Daily Polymarket probability snapshots per market.
+/// themeKey = NULL means world-scanner discovery (not yet a tracked theme).
+/// themeKey = 'world_scanner' is also valid as an explicit tag.
+model PolymarketSnapshot {
+  id                  Int      @id @default(autoincrement())
+  snapshotDate        DateTime @map("snapshot_date") @db.Date
+  marketId            String   @map("market_id")
+  title               String
+  themeKey            String?  @map("theme_key") // null = world_scanner discovery
+  probability         Float
+  volume24h           Float?   @map("volume_24h")
+  liquidity           Float?
+  probabilityDelta24h Float?   @map("probability_delta_24h") // calculated at write time
+  source              String   @default("polymarket")
+
+  @@unique([snapshotDate, marketId])
+  @@map("polymarket_snapshots")
+}
+
+/// Weekly reflection — closed-position retrospective and systemic lessons.
+/// Written by the reflection agent, read back into Step 1 context.
+model Reflection {
+  id                    Int      @id @default(autoincrement())
+  weekLabel             String   @unique @map("week_label")    // "2026-W14"
+  periodStart           DateTime @map("period_start") @db.Date
+  periodEnd             DateTime @map("period_end") @db.Date
+  closedPositionsCount  Int      @map("closed_positions_count")
+  confidenceCalibration Json     @map("confidence_calibration") // { HIGH: {count, avg_return_pct}, MEDIUM: ..., LOW: ... }
+  positionReviews       Json     @map("position_reviews")       // PositionReview[]
+  themeLessons          Json     @map("theme_lessons")          // ThemeLesson[]
+  systemLessons         String[] @map("system_lessons")
+  openPositionFlags     Json     @map("open_position_flags")    // PositionFlag[]
+  riskCalibration       Json?    @map("risk_calibration")       // Risk agent voice accuracy + biases + recommendation
+  nextWeekWatch         String?  @map("next_week_watch")
+  createdAt             DateTime @default(now()) @map("created_at")
+
+  @@map("reflections")
+}
+
+/// Full debate transcript per ticker per run. Stores all 4 rounds of the
+/// adversarial bull/bear debate for archival, pattern analysis, and future
+/// injection into the screener as PRIOR_DEBATES.
+model DebateTranscript {
+  id                 Int      @id @default(autoincrement())
+  runDate            DateTime @map("run_date") @db.Date
+  ticker             String
+  themeKey           String   @map("theme_key")
+  lane               String?                          // TACTICAL | STRATEGIC
+  strategyType       String?  @map("strategy_type")
+  regimeAtEntry      String?  @map("regime_at_entry")
+  debateRounds       Int      @default(4) @map("debate_rounds") // 2 for TACTICAL, 4 for STRATEGIC
+  bullR1             Json     @map("bull_r1")           // BullR1Output
+  bearR1             Json     @map("bear_r1")           // BearR1Output
+  bullR2             Json?    @map("bull_r2")           // BullR2Output — null for 2-round TACTICAL debates
+  bearR2             Json?    @map("bear_r2")           // BearR2Output — null for 2-round TACTICAL debates
+  finalVerdict       String   @map("final_verdict")     // STRONG_AVOID | AVOID | CAUTIOUS | MANAGEABLE
+  confidence         String?                            // HIGH | MEDIUM | LOW
+  riskDebateSummary  Json?    @map("risk_debate_summary") // Risk agent internal debate: which voice won and why
+  linkedSuggestionId Int?     @map("linked_suggestion_id")
+
+  // ── Pipeline tracking (populated by orchestrator at debate time) ──
+  screenerAction     String?  @map("screener_action")     // ADD | UPDATE | RETIRE | EXCLUDED — what the screener decided post-debate
+  rejectionReason    String?  @map("rejection_reason")    // why excluded: "ENTRY_FILTER: near 52wk high" | "BEAR_STRONG_AVOID" | "TACTICAL_LOW_REJECT" etc.
+  entryFiltersFailed String[] @map("entry_filters_failed") // which mechanical filters triggered: ["near_52wk_high", "above_sma200_25pct", "upside_below_10pct"]
+  sizingChosen       String?  @map("sizing_chosen")       // small | reduced | full — what sizing the screener proposed
+  sizingRationale    String?  @map("sizing_rationale")    // why this size — captures the reasoning for audit
+  priceAtDebate      Float?   @map("price_at_debate")     // price when debated — compare to price_at_action if entered, or to current price if rejected (would it have worked?)
+  analystTargetAtDebate Float? @map("analyst_target_at_debate") // for post-hoc "was the upside real?" analysis
+  bearPrimaryConcern String?  @map("bear_primary_concern") // one-line: the bear's fatal_flaw — for pattern matching across debates
+  bullConcessions    String[] @map("bull_concessions")    // points the bull conceded — patterns here predict losses
+
+  linkedSuggestion StockSuggestion? @relation(fields: [linkedSuggestionId], references: [id])
+  outcome          DebateOutcome?
+
+  @@unique([runDate, ticker])
+  @@index([ticker, runDate(sort: Desc)])
+  @@map("debate_transcripts")
+}
+
+/// Links a debate transcript to its realized outcome. Populated when the
+/// position closes (or during weekly reflection). Enables pattern analysis:
+/// "which debate patterns predict winners?"
+model DebateOutcome {
+  id                   Int      @id @default(autoincrement())
+  debateTranscriptId   Int      @unique @map("debate_transcript_id")
+  realizedPnlPct       Float?   @map("realized_pnl_pct")
+  holdingDays          Int?     @map("holding_days")
+  exitRuleFired        String?  @map("exit_rule_fired")    // which exit rule actually triggered
+  bearWasRight         Boolean? @map("bear_was_right")     // did the bear's primary concern materialize?
+  outcomeNotes         String?  @map("outcome_notes")
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  debateTranscript DebateTranscript @relation(fields: [debateTranscriptId], references: [id])
+
+  @@map("debate_outcomes")
+}
+
+/// One row per daily run. Regime history, what changed, what was active.
+model DailyLog {
+  id            Int      @id @default(autoincrement())
+  logDate       DateTime @unique @map("log_date") @db.Date
+  macroRegime   String?  @map("macro_regime")
+  dominantEvent String?  @map("dominant_event")
+  themesActive  String[] @map("themes_active")
+  stocksAdded   String[] @map("stocks_added")
+  stocksRetired String[] @map("stocks_retired")
+  notes         String?
+
+  @@map("daily_log")
+}
+
+/// Structured insights from each daily run — the orchestrator's key calls,
+/// warnings, and predictions. Loaded in Step 1 for continuity across runs.
+model DailyInsight {
+  id               Int      @id @default(autoincrement())
+  insightDate      DateTime @unique @map("insight_date") @db.Date
+  geoPulseBullets  String[] @map("geo_pulse_bullets")    // 3 headline bullets (avoid repeating tomorrow)
+  warningsFlagged  Json?    @map("warnings_flagged")     // [{ ticker, warning, severity }]
+  predictionsWatch Json?    @map("predictions_watch")    // [{ prediction, deadline, resolved? }]
+  thesisChanges    Json?    @map("thesis_changes")       // [{ ticker, change, direction }]
+  regimeFitCalls   Json?    @map("regime_fit_calls")     // [{ theme_key, fit, reason }]
+  keyDecisions     String[] @map("key_decisions")        // top 3-5 decisions made and why
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@map("daily_insights")
+}
