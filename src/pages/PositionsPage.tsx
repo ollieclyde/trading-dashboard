@@ -95,7 +95,7 @@ export function PositionsPage() {
           ) : (
             <Card>
               <CardContent className="py-8 text-center text-sm text-muted-foreground">
-                No {status.toLowerCase()} positions
+                {status === 'OPEN' ? 'No open positions — your active trades will appear here.' : 'No closed positions yet — exit history shows up after a trade closes.'}
               </CardContent>
             </Card>
           )}
