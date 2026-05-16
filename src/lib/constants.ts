@@ -39,3 +39,13 @@ export const STATUS_COLORS: Record<string, string> = {
   NEUTRAL: 'text-zinc-400',
   WEAKENING: 'text-red-400',
 }
+
+// Reserved for future "regime" tagging in the analytics layer. Not yet
+// surfaced in the UI — added now so the analytics pipeline can start
+// emitting these keys safely.
+export const REGIME_COLORS: Record<string, string> = {
+  BULL: 'bg-green-700/30 text-green-300',
+  BEAR: 'bg-red-700/30 text-red-300',
+  CHOP: 'bg-yellow-700/30 text-yellow-300',
+  TREND: 'bg-blue-700/30 text-blue-300',
+}
