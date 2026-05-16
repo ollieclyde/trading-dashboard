@@ -13,7 +13,16 @@ export function PositionsPage() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-lg font-semibold">Positions</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold">Positions</h2>
+        <button
+          type="button"
+          className="rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent"
+          onClick={() => window.alert('CSV export coming soon')}
+        >
+          Export CSV
+        </button>
+      </div>
 
       <Tabs value={status} onValueChange={setStatus}>
         <TabsList>
