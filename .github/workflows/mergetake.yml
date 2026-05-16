@@ -1,0 +1,48 @@
+name: MergeTake
+
+# Triggers:
+#   - when the `mergetake` label is added to a PR (initial run)
+#   - when a labelled PR gets new commits (refresh the walkthrough)
+on:
+  pull_request:
+    types: [labeled, synchronize]
+
+# OIDC permissions — `id-token: write` lets the runner mint a short-lived
+# JWT that proves "this CI run came from this repo" to mergetake.com.
+# Replaces the api-key approach. No long-lived secrets to rotate.
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: read
+
+jobs:
+  mergetake:
+    # Only run when the trigger is the `mergetake` label or when a labelled
+    # PR was synchronized. Re-label to retry.
+    if: >
+      (github.event.action == 'labeled' && github.event.label.name == 'mergetake')
+      || (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'mergetake'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need history for diff against the base SHA.
+          fetch-depth: 0
+
+      - uses: mergetake/action@v1
+        with:
+          # Where mergetake.com should call to receive the OIDC-authenticated
+          # plan request. Override only if pointing at a self-hosted instance.
+          service-url: https://eye-service.fly.dev
+          # OIDC audience — must match the service's GITHUB_OIDC_AUDIENCE.
+          oidc-audience: https://mergetake.com
+          # The running app to record against. Most teams point this at their
+          # preview deploy URL (Vercel / Netlify / Cloudflare Pages / Fly).
+          # Local-only flows can target http://localhost:3000 with a separate
+          # `npm run dev` step earlier in this job.
+          app-url: ${{ vars.MERGETAKE_APP_URL }}
+          # Optional auth — see https://mergetake.com/docs/auth.
+          # auth: storage-state
+          # auth-state: ${{ secrets.MERGETAKE_STORAGE_STATE }}
