@@ -19,7 +19,16 @@ export function PositionsPage() {
         <TabsList>
           <TabsTrigger value="OPEN">Open</TabsTrigger>
           <TabsTrigger value="CLOSED">Closed</TabsTrigger>
+          <TabsTrigger value="WATCHLIST">Watchlist</TabsTrigger>
         </TabsList>
+
+        <TabsContent value="WATCHLIST" className="mt-4">
+          <Card>
+            <CardContent className="py-12 text-center text-sm text-muted-foreground">
+              Watchlist coming soon — track tickers you're considering before opening a position.
+            </CardContent>
+          </Card>
+        </TabsContent>
 
         <TabsContent value={status} className="mt-4">
           {isLoading ? (
