@@ -1,0 +1,20 @@
+{
+  "appUrl": "http://localhost:3456",
+  "auth": { "mode": "none" },
+  "viewport": { "width": 1280, "height": 720 },
+  "outDir": ".appeye/out",
+  "mocks": [
+    {
+      "url": "/\\/api\\/positions\\?status=OPEN/",
+      "fixturePath": "./.appeye/fixtures/positions-open.json",
+      "status": 200,
+      "contentType": "application/json"
+    },
+    {
+      "url": "/\\/api\\/positions\\?status=CLOSED/",
+      "fixturePath": "./.appeye/fixtures/positions-closed.json",
+      "status": 200,
+      "contentType": "application/json"
+    }
+  ]
+}

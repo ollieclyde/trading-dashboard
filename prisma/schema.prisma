@@ -210,10 +210,27 @@ model Reflection {
   systemLessons         String[] @map("system_lessons")
   openPositionFlags     Json     @map("open_position_flags")    // PositionFlag[]
   riskCalibration       Json?    @map("risk_calibration")       // Risk agent voice accuracy + biases + recommendation
+  strategyCalibration   Json?    @map("strategy_calibration")   // Per-strategy-type avg return, win rate, notes
+  debateCalibration     Json?    @map("debate_calibration")     // Bear accuracy, verdict vs outcomes, blind spots
+  rankingCalibration    Json?    @map("ranking_calibration")    // Rank vs selection, filter accuracy, weight recs
   nextWeekWatch         String?  @map("next_week_watch")
   createdAt             DateTime @default(now()) @map("created_at")
 
   @@map("reflections")
+}
+
+/// Cache for T212 instrument ticker mappings.
+/// Avoids repeated mcp__trading212__search_instrument calls for known tickers.
+/// Instruments rarely change — once cached, they persist until re-verified.
+model T212Instrument {
+  ticker       String   @id               // standard ticker: AAPL, RHM.DE, BA.L
+  t212Ticker   String   @map("t212_ticker") // T212 format: AAPL_US_EQ, RHMd_EQ
+  name         String?                      // instrument name from T212
+  currencyCode String?  @map("currency_code") // USD, EUR, GBp
+  available    Boolean  @default(true)      // false if search returned no match
+  checkedAt    DateTime @default(now()) @map("checked_at")
+
+  @@map("t212_instruments")
 }
 
 /// Full debate transcript per ticker per run. Stores all 4 rounds of the
@@ -293,6 +310,7 @@ model DailyLog {
 model DailyInsight {
   id               Int      @id @default(autoincrement())
   insightDate      DateTime @unique @map("insight_date") @db.Date
+  rankingSnapshot  Json?    @map("ranking_snapshot")     // Full RANKED_CANDIDATES output — per-theme top 5 with scores, filtered-out tickers, T212 unavailable. Used by reflection for ranking quality analysis.
   geoPulseBullets  String[] @map("geo_pulse_bullets")    // 3 headline bullets (avoid repeating tomorrow)
   warningsFlagged  Json?    @map("warnings_flagged")     // [{ ticker, warning, severity }]
   predictionsWatch Json?    @map("predictions_watch")    // [{ prediction, deadline, resolved? }]
