@@ -17,13 +17,11 @@ permissions:
 
 jobs:
   mergetake:
-    # Only run when the trigger is the `mergetake` label or when a labelled
-    # PR was synchronized. Re-label to retry.
     if: >
       (github.event.action == 'labeled' && github.event.label.name == 'mergetake')
       || (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'mergetake'))
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -31,18 +29,69 @@ jobs:
           # Need history for diff against the base SHA.
           fetch-depth: 0
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Stub out the sibling `trading-agent` repo that the dev server imports
+      # from. We only need the UI chrome to render — API endpoints can return
+      # empty arrays and that's fine for the recorder. Remove this step if
+      # your dev server doesn't depend on a sibling repo.
+      - name: Stub trading-agent sibling
+        run: |
+          mkdir -p ../trading-agent/src/db
+          cat > ../trading-agent/src/db/queries.js <<'EOF'
+          export const getDebateHistory = async () => []
+          export const getDebateById = async () => null
+          export const getRunDates = async () => []
+          export const getRunDetail = async () => null
+          export const getAllPositions = async () => []
+          export const getAllReflections = async () => []
+          export const getActiveThemes = async () => []
+          export const getThemeTimeline = async () => []
+          EOF
+          cat > ../trading-agent/src/db/client.js <<'EOF'
+          // No-op Prisma proxy: every model.findMany/findUnique/... returns []
+          const noop = new Proxy({}, {
+            get() {
+              return new Proxy({}, { get: () => async () => [] })
+            },
+          })
+          export const prisma = noop
+          EOF
+
+      # Boot the dev server in the background so the recorder can drive it
+      # at http://localhost:3456 below. Adjust port + readiness probe if
+      # `npm run dev` listens elsewhere in your project.
+      - name: Start dev server
+        run: |
+          npm run dev > dev-server.log 2>&1 &
+          echo "$!" > dev-server.pid
+          for i in $(seq 1 90); do
+            if curl -sf http://localhost:3456 >/dev/null 2>&1; then
+              echo "Dev server ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Dev server didn't respond on :3456 within 90s"
+          echo "--- dev-server.log ---"
+          cat dev-server.log
+          exit 1
+
       - uses: mergetake/action@v1
         with:
-          # Where mergetake.com should call to receive the OIDC-authenticated
-          # plan request. Override only if pointing at a self-hosted instance.
           service-url: https://eye-service.fly.dev
-          # OIDC audience — must match the service's GITHUB_OIDC_AUDIENCE.
           oidc-audience: https://mergetake.com
-          # The running app to record against. Most teams point this at their
-          # preview deploy URL (Vercel / Netlify / Cloudflare Pages / Fly).
-          # Local-only flows can target http://localhost:3000 with a separate
-          # `npm run dev` step earlier in this job.
-          app-url: ${{ vars.MERGETAKE_APP_URL }}
-          # Optional auth — see https://mergetake.com/docs/auth.
-          # auth: storage-state
-          # auth-state: ${{ secrets.MERGETAKE_STORAGE_STATE }}
+          app-url: http://localhost:3456
+
+      - name: Stop dev server
+        if: always()
+        run: |
+          if [ -f dev-server.pid ]; then
+            kill "$(cat dev-server.pid)" 2>/dev/null || true
+          fi
